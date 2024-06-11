@@ -1,0 +1,1 @@
+A place to share code edits for the outer models of LPL and PFM. Currently working on L1 code that can be run to download Hycom data. It then turns this into ROMS data (assuming access to a Roms grid).
