@@ -180,7 +180,6 @@ def time_filter(in_dir, h_list, out_dir,datestring_start):
             dts = out_name.strip('fh').strip('.p') 
             dt = datetime.strptime(dts, ds_fmt_H)
             aa['dt'] = dt.date()
-            
             out_name= 'fh'+datetime.strftime(dt.date(), ds_fmt)+'.p'
             print('   ' + out_name)
             pickle.dump(aa, open(out_dir / out_name, 'wb'))
