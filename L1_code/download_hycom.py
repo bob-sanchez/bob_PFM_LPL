@@ -75,11 +75,12 @@ def get_data(this_dt, out_fn, aa):
     """
     # THE URL BELOW IS FOR May 2016 through Jan 31 2017
     """
-    https://ncss.hycom.org/thredds/ncss/GLBy0.08/expt_57.2
+    https://ncss.hycom.org/thredds/ncss/GLBv0.08/expt_57.2
     ?var=surf_el&var=salinity&var=water_temp&var=water_u&var=water_v
     &north=36.39&west=236.28&east=244.22&south=28.52&disableProjSubset=on&horizStride=1&time=2018-12-15T12%3A00%3A00Z&vertCoord=&accept=netcdf4
     """
-    url = ('https://ncss.hycom.org/thredds/ncss/GLBy0.08/expt_57.2'+
+## pay attention to url GLBv or GLBy
+    url = ('https://ncss.hycom.org/thredds/ncss/GLBv0.08/expt_57.2'+
         '?var='+var_list +
         '&north='+str(north)+'&south='+str(south)+'&west='+str(west)+'&east='+str(east) +
         '&disableProjSubset=on&&horizStride=1' +
