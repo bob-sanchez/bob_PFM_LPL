@@ -705,12 +705,13 @@ def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
     h = G['h']
     angle = G['angle']
     #IMr = cKDTree(XYin).query(XYr)[1]  #old nearest neighbor
-    interp_func = RegularGridInterpolator((lat, lon), b['ssh'])
+    
     
     # 2D fields
     for vn in ['ssh', 'ubar', 'vbar']:
         # interp hycom to finer grid
-        setattr(interp_func,'values',b[vn])
+        interp_func = RegularGridInterpolator((lat, lon), b[vn])
+        #setattr(interp_func,'values',b[vn])
         vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
         #vn_fi=interp_func((Lthi,Lnhi))
         
@@ -750,7 +751,8 @@ def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
         for nn in range(N):
             vin = b[vn][nn,:,:]
             # interp hycom to finer grid
-            setattr(interp_func,'values',vin)
+            interp_func = RegularGridInterpolator((lat, lon), vin)
+            #setattr(interp_func,'values',vin)
             vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
             #interp_func = RegularGridInterpolator((lat, lon), vin)
             #vn_fi=interp_func((Lthi,Lnhi))
@@ -761,14 +763,13 @@ def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
         checknan(FF)
         vi_dict[vn] = FF
     vv = np.nan*np.ones(((N,)+G['h'].shape))
-    interp_z = interp1d(z, vi_dict['theta'][:,0,0],  kind='linear', fill_value="extrapolate")   
+     
     # do the vertical interpolation from HYCOM to ROMS z positions
     for vn in [ 's3d', 'theta','u3d', 'v3d']:
         vi = vi_dict[vn]
         for k in range(G['M']):
             for j in range(G['L']):
-                setattr(interp_z,'values',vi[:,k,j])
-
+                interp_z = interp1d(z, vi[:,k,j],  kind='linear', fill_value="extrapolate")  
                 #hinds = np.indices((S['N'], G['M'], G['L']))
                 #vvf = vi[zinds, hinds[1].flatten(), hinds[2].flatten()]
                 #vv = vvf.reshape((S['N'], G['M'], G['L']))
