@@ -2,7 +2,7 @@ import sys, os
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import time, sleep
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.spatial import cKDTree
 from scipy import signal
 import netCDF4 as nc
@@ -18,7 +18,7 @@ import seawater
 
 grid_file = '/home/rmsanche/research/LV1_2017/GRID_SDTJRE_LV1_rx020_hmask.nc' #LV1 grid
 
-datestring_start = '2017.01.17.03' #initial file time, note it will process all the times in a folder after this time
+datestring_start = '2016.11.15.00' #initial file time, note it will process all the times in a folder after this time
 
 hout_dir = '/home/rmsanche/research/LV1_2017/Hycom/Data/' #where the history files are located
 out_dir = '/home/rmsanche/research/LV1_2017/Hycom/' #where the processed files are to be dumped
@@ -83,7 +83,10 @@ def convert_extraction(fn):
         N = len(z)
         
     # get full coordinates (vectors for the plaid grid)
-    lon = ds.variables['lon'][:] - 360  # convert from 0:360 to -360:0 format
+    lon_offset = 0
+    if np.min(ds.variables['lon'][:]) > 0:
+        lon_offset = 360
+    lon = ds.variables['lon'][:] - lon_offset  # convert from 0:360 to -360:0 format
     lat = ds.variables['lat'][:]
     # and save them   
     out_dict['lon'] = lon
@@ -712,7 +715,7 @@ def get_basic_info(fn, only_G=False, only_S=False, only_T=False):
         return make_G(ds), make_S(ds), make_T(ds)
     ds.close()
 
-def get_interpolated(G, S, b, lon, lat, z, N, zinds):
+def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
     """
     This does the horizontal and vertical interpolation to get from
     extrapolated, filtered HYCOM fields to ROMS fields.
@@ -750,17 +753,19 @@ def get_interpolated(G, S, b, lon, lat, z, N, zinds):
     # nearest neighbor interpolation from XYin to XYr is done below...
     h = G['h']
     angle = G['angle']
-    IMr = cKDTree(XYin).query(XYr)[1]  
+    #IMr = cKDTree(XYin).query(XYr)[1]  #old nearest neighbor
+    interp_func = RegularGridInterpolator((lat, lon), b['ssh'])
     
     # 2D fields
     for vn in ['ssh', 'ubar', 'vbar']:
         # interp hycom to finer grid
-        interp_func = RegularGridInterpolator((lat, lon), b[vn])
-        vn_fi=interp_func((Lthi,Lnhi))
+        setattr(interp_func,'values',b[vn])
+        vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
+        #vn_fi=interp_func((Lthi,Lnhi))
         
         # interp to roms from the fine hycom ssh
-        vv = vn_fi.flatten()[IMr].reshape(h.shape)    
-        #vv = b[vn].flatten()[IMr].reshape(h.shape) #old code
+        vv = vn_fi#.flatten()[IMr].reshape(h.shape)    
+    
         vvc = vv.copy()
         # always a good idea to make sure dict entries are not just pointers
         # to arrays that might be changed later, hence the .copy()
@@ -794,25 +799,38 @@ def get_interpolated(G, S, b, lon, lat, z, N, zinds):
         for nn in range(N):
             vin = b[vn][nn,:,:]
             # interp hycom to finer grid
-            interp_func = RegularGridInterpolator((lat, lon), vin)
-            vn_fi=interp_func((Lthi,Lnhi))
+            setattr(interp_func,'values',vin)
+            vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
+            #interp_func = RegularGridInterpolator((lat, lon), vin)
+            #vn_fi=interp_func((Lthi,Lnhi))
             
             # interp to roms from the fine hycom ssh
-            FF[nn,:,:] = vn_fi.flatten()[IMr].reshape(h.shape)    
+            FF[nn,:,:] = vn_fi#.flatten()[IMr].reshape(h.shape)    
             #FF[nn,:,:] = vin[IMr].reshape(h.shape)
         checknan(FF)
         vi_dict[vn] = FF
-    
+
+    interp_z = interp1d(z, vi_dict['theta'][:,0,0],  kind='linear', fill_value="extrapolate")   
     # do the vertical interpolation from HYCOM to ROMS z positions
     for vn in [ 's3d', 'theta','u3d', 'v3d']:
         vi = vi_dict[vn]
-        hinds = np.indices((S['N'], G['M'], G['L']))
-        vvf = vi[zinds, hinds[1].flatten(), hinds[2].flatten()]
-        vv = vvf.reshape((S['N'], G['M'], G['L']))
+        for k in range(G['M']):
+            for j in range(G['L']):
+                setattr(interp_z,'values',vi[:,k,j])
+
+                #hinds = np.indices((S['N'], G['M'], G['L']))
+                #vvf = vi[zinds, hinds[1].flatten(), hinds[2].flatten()]
+                #vv = vvf.reshape((S['N'], G['M'], G['L']))
+                vv[:,k,j] = interp_z(zr[:,k,j])
         vvc = vv.copy()
 
         checknan(vvc)
         c[vn] = vvc
+
+        #hinds = np.indices((S['N'], G['M'], G['L']))
+        #vvf = vi[zinds, hinds[1].flatten(), hinds[2].flatten()]
+        #vv = vvf.reshape((S['N'], G['M'], G['L']))
+
 
      #rotate velocites
     vu = c['u3d']
@@ -1021,7 +1039,6 @@ def make_bry_file(in_fn, out_fn):
 #### Actual code below
 
 
-
 ds_fmt_hr = '%Y.%m.%d.%H'
 
 h_out_dir = Path(hout_dir)
@@ -1083,14 +1100,15 @@ xfh_list = sorted([item.name for item in h_out_dir.iterdir()
 dt_list = []
 count = 0
 c_dict = dict()
-zinds = get_zinds(G['h'], S, z) #enforce -5000 m
+#zinds = get_zinds(G['h'], S, z) #enforce -5000 m
+zr = get_z(G['h'], 0*G['h'], S, only_rho=True) #gets zr
 
 #now interpolate to ROMS grid
 for fn in xfh_list:
     print('-Interpolating ' + fn + ' to ROMS grid')
     b = pickle.load(open(h_out_dir / fn, 'rb'))
     dt_list.append(b['dt'])
-    c = get_interpolated(G, S, b, lon, lat, z, N, zinds) #modified to use linear interp instead
+    c = get_interpolated_z(G, S, b, lon, lat, z, N, zr) #modified to use linear interp instead
     c_dict[count] = c
     count += 1
 
