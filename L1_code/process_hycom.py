@@ -399,55 +399,6 @@ def get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z, add_CTD=False):
     V['theta'] = seawater.ptmp(V['s3d'], V['t3d'], press_db)    
     return V
 
-def get_basic_info(fn, only_G=False, only_S=False, only_T=False):
-    """
-    Gets grid, vertical coordinate, and time info from a ROMS NetCDF
-    history file with full name 'fn'
-    Input: the filename (with path if needed)
-    Output: dicts G, S, and T
-    Example calls:
-    G, S, T = zfun.get_basic_info(fn)
-    T = zfun.get_basic_info(fn, only_T=True)
-    """
-    ds = xr.open_dataset(fn)
-    def make_G(ds):
-        # get grid and bathymetry info
-        g_varlist = ['h', 'lon_rho', 'lat_rho', 'lon_u', 'lat_u', 'lon_v', 'lat_v',
-        'lon_psi', 'lat_psi', 'mask_rho', 'mask_u', 'mask_v', 'pm', 'pn','angle']
-        G = dict()
-        for vv in g_varlist:
-            G[vv] = ds[vv].values
-        G['DX'] = 1/G['pm']
-        G['DY'] = 1/G['pn']
-        G['M'], G['L'] = np.shape(G['lon_rho']) # M = rows, L = columns
-        return G
-    def make_S(ds):
-        # get vertical sigma-coordinate info (vectors are bottom to top)
-        s_varlist = ['s_rho', 's_w', 'hc', 'Cs_r', 'Cs_w', 'Vtransform']
-        S = dict()
-        for vv in s_varlist:
-            S[vv] = ds[vv].values
-        S['N'] = len(S['s_rho']) # number of vertical levels
-        return S
-    def make_T(ds):
-        # returns two single values, one a datatime, and one a float
-        ot = ds.ocean_time.values # an array with dtype='datetime64[ns]'
-        dti = pd.to_datetime(ot) # a pandas DatetimeIndex with dtype='datetime64[ns]'
-        dt = dti.to_pydatetime() # an array of datetimes
-        T = dict()
-        T['dt'] = dt[0] # a datetime object
-        T['ocean_time'] = Lfun.datetime_to_modtime(dt[0]) # a float, "seconds since..."
-        return T
-    # return results
-    if only_G:
-        return make_G(ds)
-    elif only_S:
-        return make_S(ds)
-    elif only_T:
-        return make_T(ds)
-    else:
-        return make_G(ds), make_S(ds), make_T(ds)
-    ds.close()
 
 def get_S(S_info_dict):
     """
@@ -679,7 +630,7 @@ def get_basic_info(fn, only_G=False, only_S=False, only_T=False):
     def make_G(ds):
         # get grid and bathymetry info
         g_varlist = ['h', 'lon_rho', 'lat_rho', 'lon_u', 'lat_u', 'lon_v', 'lat_v',
-        'lon_psi', 'lat_psi', 'mask_rho', 'mask_u', 'mask_v', 'pm', 'pn',]
+        'lon_psi', 'lat_psi', 'mask_rho', 'mask_u', 'mask_v', 'pm', 'pn', 'angle']
         G = dict()
         for vv in g_varlist:
             G[vv] = ds[vv].values
@@ -809,7 +760,7 @@ def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
             #FF[nn,:,:] = vin[IMr].reshape(h.shape)
         checknan(FF)
         vi_dict[vn] = FF
-
+    vv = np.nan*np.ones(((N,)+G['h'].shape))
     interp_z = interp1d(z, vi_dict['theta'][:,0,0],  kind='linear', fill_value="extrapolate")   
     # do the vertical interpolation from HYCOM to ROMS z positions
     for vn in [ 's3d', 'theta','u3d', 'v3d']:
