@@ -1,4 +1,5 @@
-import sys, os
+#this code is a version of process hycom that runs in parallel (work in progress)
+# import sys, os
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import time, sleep
@@ -1184,3 +1185,4 @@ sys.stdout.flush()
 
 
 
+)

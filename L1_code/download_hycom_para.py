@@ -1,3 +1,6 @@
+#download_hycom_para
+#attempt to parallize the downloading of hycom data
+#not clean code
 # import
 import xarray as xr
 import matplotlib.pyplot as plt
@@ -13,53 +16,30 @@ import seawater
 import subprocess
 import requests
 import pathlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 #####modify these variables
 
 grid_file = '/home/rmsanche/research/LV1_2017/GRID_SDTJRE_LV1_rx020_hmask.nc' #LV1 grid
-datestring_start = '2017.03.01.03'
-datestring_end = '2017.06.01.09'
+datestring_start = '2017.10.01.21'
+datestring_end = '2017.12.05.12'
 #out_dir = 'Data/test_hycom' # processes in a different file
-hout_dir = '/home/rmsanche/research/LV1_2017/Hycom/Data/' #where the history files are dumped
+#hout_dir = '/home/rmsanche/research/LV1_2017/Hycom/Data/' #where the history files are dumped
+#^^^ edit this in the code below full_fn_out is the variable
 
 ###### Important, before running make sure the URL is over the correct time stamp
 
 
 #####functions
-#lightly modified from Parkers original
-def get_data(this_dt, out_fn, aa):
-    """"
-    From LO package hycom data using the FMRC_best file.
-    It gets only a single time, per the new guidance from Michael McDonald
-    at HYCOM, 2020.03.16.
-    
-    Note that this hard-codes HYCOM experiment info like GLBy0.08/expt_93.0
-    and so could fail when this is superseded.
 
-    Also it is no longer daily but every three hours
 
-    L1 grid is hardcoded
-    """
-    ds_fmt = '%Y.%m.%d.%H'
-    dstr = this_dt.strftime(ds_fmt)
-    # time string in HYCOM format
-    dstr_hy = this_dt.strftime('%Y-%m-%d-T%H:%M:%SZ')
-    
-    
-    print(' - getting hycom fields for ' + dstr)
-    
-    # specify spatial limits
-
+def para_loop(dtff,aa,ds_fmt):
     north = aa[0]
     south = aa[1]
     west = aa[2]
     east = aa[3]
-    testing = False #turn off for run
-    if testing == True:
-        var_list = 'surf_el'
-    else:
-        #var_list = 'surf_el,water_temp,salinity,water_u,water_v'
-        var_list = 'surf_el&var=salinity&var=water_temp&var=water_u&var=water_v'
+
+
 
     # template for url from Michael MacDonald March 2020
     """
@@ -88,45 +68,49 @@ def get_data(this_dt, out_fn, aa):
     ?var=surf_el&var=salinity&var=water_temp&var=water_u&var=water_v
     &north=36.39&west=236.28&east=244.22&south=28.52&disableProjSubset=on&horizStride=1&time=2018-12-15T12%3A00%3A00Z&vertCoord=&accept=netcdf4
     """
-## MODIFY THIS URL, PAY ATTENTION TO lowercase letter in GLBv or GLBy etc
-    url = ('https://ncss.hycom.org/thredds/ncss/GLBv0.08/expt_92.8'+
-        '?var='+var_list +
-        '&north='+str(north)+'&south='+str(south)+'&west='+str(west)+'&east='+str(east) +
-        '&disableProjSubset=on&&horizStride=1' +
-        '&time='+dstr_hy +
-        '&vertCoord=&accept=netcdf4') 
-        #'&addLatLon=true&accept=netcdf4')    
+    #the URL below is for June 1st (noon) through
+    
+    #https://tds.hycom.org/thredds/ncss/GLBv0.08/expt_57.7
+    ## MODIFY THIS URL, PAY ATTENTION TO lowercase letter in GLBv or GLBy etc
+        
+
+    data_out_fn =  h_out_dir /  ('h' + dtff.strftime(ds_fmt)+ '.nc')   
     if verbose:
-        print(url)
-    # new version 2020.04.22 using requests
-    counter = 1
-    got_fmrc = False
-    while (counter <= 10) and (got_fmrc == False):
-        print(' - Attempting to get data, counter = ' + str(counter))
-        time.sleep(10) # pause before each request
-        tt0 = time.time()
-        try:
-            r = requests.get(url, timeout=200)
-            if r.ok:
-                with open(out_fn,'wb') as f:
-                    f.write(r.content)
-                got_fmrc = True
-                r.close()
-            elif not r.ok:
-                print(' - Failed with status code:')
-                print(r.status_code)
-        except Exception as e:
-            print(' - Exception from requests:')
-            print(e)
-        counter += 1
-        print(' - took %0.1f seconds' % (time.time() - tt0))
-        print(datetime.now())
-        print('')
-        sys.stdout.flush()
-    return got_fmrc
+        print(data_out_fn)
+    sys.stdout.flush()
 
 
-### code that gets run
+    # time limits
+    dtff_cop = dtff
+    dtff_adv = dtff+timedelta(hours=2)
+    dstr0 = dtff.strftime('%Y-%m-%dT%H:%M')
+    dstr1 = dtff_adv.strftime('%Y-%m-%dT%H:%M')
+    # use subprocess.call() to execute the ncks command
+    vstr = 'surf_el,water_temp,salinity,water_u,water_v'
+    #where to save the data
+    full_fn_out=  '/home/rmsanche/research/LV1_2017/Hycom/Data/'+'h' + dtff_cop.strftime(ds_fmt)+ '.nc'  
+    cmd_list = ['ncks',
+        '-d', 'time,'+dstr0+','+dstr1,
+        '-d', 'lon,'+str(west-.05)+','+str(east)+'',
+        '-d', 'lat,'+str(south-.08)+','+str(north)+'',
+        '-v', vstr,
+        'https://tds.hycom.org/thredds/dodsC/GLBv0.08/expt_92.9',
+        '-4', '-O', full_fn_out]
+
+    print(cmd_list)
+
+    # run ncks
+    ret1 = subprocess.call(cmd_list)
+    return dtff
+
+
+
+
+
+
+
+
+### code that gets aa
 grid = xr.open_dataset(grid_file)
 north = max(grid.lat_v.max(),grid.lat_rho.max(),grid.lat_u.max()).values #north boundary
 dlat = 0.04
@@ -138,9 +122,9 @@ aa = [north+dlat, south-dlat, west-dlon, east+dlon]
 aa = [np.round(i,2) for i in aa]
 
 #establish timestamp
-#will be converted to a list of days
 
 ds_fmt = '%Y.%m.%d.%H'
+ds_fmt2 = '%Y-%m-%d-T%H:%M:%SZ'
 this_dt = datetime.strptime(datestring_start, ds_fmt)
 
 
@@ -163,26 +147,34 @@ dt1 = end_dt
 dt_list_full = []
 dtff = dt0
 
+#timestamps
 while dtff <= dt1:
     dt_list_full.append(dtff)
     dtff = dtff + timedelta(hours=3)
     
 verbose = True
-
+#this is where we para
 tt0 = time.time()
-for dtff in dt_list_full:
-    got_fmrc = False
-    data_out_fn =  h_out_dir /  ('h' + dtff.strftime(ds_fmt)+ '.nc')   
-    if verbose:
-        print(data_out_fn)
-    sys.stdout.flush()
-    # get hycom forecast data from the web, and save it in the file "data_out_fn".
-    # it tries 10 times before ending
-    got_fmrc = get_data(dtff, data_out_fn,aa)
-    if got_fmrc == False:
-        # this should break out of the dtff loop at the first failure
-        # and send the code to Plan C
-        print('- error getting forecast files using fmrc')
+
+
+
+# create parallel executor
+with ThreadPoolExecutor() as executor:
+    threads = []
+    for dtff in dt_list_full:
+        fn = para_loop #define function
+        args = [dtff,aa,ds_fmt] #define args
+        kwargs = {} #
+        # start thread by submitting it to the executor
+        threads.append(executor.submit(fn, *args, **kwargs))
+    for future in as_completed(threads):
+            # retrieve the result
+            result = future.result()
+            # report the result
+ 
+
+
         
 print('Time to get full file using get url = %0.2f sec' % (time.time()-tt0))
+
 
