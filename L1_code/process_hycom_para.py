@@ -11,28 +11,48 @@ import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 import os, sys, shutil
+import os.path
+from functools import partial
+
 from datetime import datetime, timedelta
 import pickle
 import seawater
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 #####modify these variables
 
 grid_file = '/home/rmsanche/research/LV1_2017/GRID_SDTJRE_LV1_rx020_hmask.nc' #LV1 grid
 
 datestring_start = '2016.11.30.00' #initial file time, note it will process all the times in a folder after this time
-datestring_end = '2017.12.02.00'
+datestring_end = '2017.12.05.09'
 
-hout_dir = '/home/rmsanche/research/LV1_2017/Hycom/Data/' #where the history files are located
-out_dir = '/home/rmsanche/research/LV1_2017/Hycom/' #where the processed files are to be dumped
+hout_dir = '/scratch/bob/Hycom/' #where the history files are located
+out_dir = '/scratch/bob/Hycom/' #where the processed files are to be dumped
 S_info_dict = {'N' : 40, 'VSTRETCHING': 4, 'VTRANSFORM': 2, 'TCLINE': 50.0, 'THETA_S': 8.0, 'THETA_B': 3.0}
+
+#this bit of the code is for debugging and saving
+#each of these steps involves saving a pickle file so once that file is saved you don't need to rerun it
+#if False it already exists and you skip
+pickles = False #do pickle files already exist (in my case yes) *.p
+filter = False #are they filtered fh*.p
+extrap = False #are the nans filled xfh*.p
+interp = False #is it on the roms grid ixfh*.p
+nc_need = True # are there .nc files
+
 #info about roms grid (can be found by looking at roms grid)
-clm_fname = 'ocean_clm_LV1.nc' #output file names for clm file, ini file and bry file
-ini_fname = 'ocean_ini_LV1.nc'
-bry_fname = 'ocean_bry_LV1.nc'
+clm_fname_base = 'ocean_clm_LV1_' #output file names for clm file, ini file and bry file
+ini_fname_base = 'ocean_ini_LV1_'
+bry_fname_base = 'ocean_bry_LV1_'
+Number_time = 5 #number of timesteps per file
+
+#can make it so that it automatically removes the hycom files from the directory after the boundary conditions are made
+remove_hycom = False
 
 #the output file names ocn_clm.nc, ocn_bry.nc and ocn_ini.nc are standardized but can updated at the bottom of the code
 
 #####functions
+
+
 #lightly modified from Parkers original
 def get_hnc_short_list(h_out_dir):
     '''generates a shortlist that has just hycom nc files'''
@@ -130,6 +150,101 @@ def convert_extraction(fn):
     ds.close()
     
     return out_dict # the keys of this dictionary are separate variables
+
+def convert_extraction_para(fn):
+    """
+    This converts a hycom NetCDF extraction file into a
+    pickled dict of fields, doing some renaming and packing things
+    bottom to top.  It could probably be skipped over in future
+    versions, and is here because subsequent workflow depends on the
+    pickled dict existing.
+    """
+    
+    testing = False
+    
+    # initialize an output dict
+    out_dict = dict()
+    
+    # load the file
+    ds = nc.Dataset(fn)
+    # fn can be either a Path object or a string, in either case
+    # corresponding to a NetCDF file.
+    
+    if testing:
+        print('opening ' + fn)
+    
+    # get time info
+    t = ds['time'][0]
+    if isinstance(t, np.ma.MaskedArray):
+        th = t.data
+    else:
+        th = t
+    tu = ds['time'].units
+    # e.g. 'hours since 2018-11-20 12:00:00.000 UTC'
+    # Warning: Brittle code below!
+    ymd = tu.split()[2]
+    hmss = tu.split()[3]
+    hms = hmss.split('.')[0]
+    hycom_dt0 = datetime.strptime(ymd + ' ' + hms, '%Y-%m-%d %H:%M:%S')
+    this_dt = hycom_dt0 + timedelta(days=(th/24))
+    out_dict['dt'] = this_dt # datetime time of this snapshot
+    # print('- for dt = ' + str(this_dt))
+    
+    if testing == False:
+        # create z from the depth
+        depth = ds.variables['depth'][:]
+        z = -depth[::-1] # you reverse an axis with a -1 step!
+        out_dict['z'] = z
+        N = len(z)
+        
+    # get full coordinates (vectors for the plaid grid)
+    lon_offset = 0
+    if np.min(ds.variables['lon'][:]) > 0:
+        lon_offset = 360
+    lon = ds.variables['lon'][:] - lon_offset  # convert from 0:360 to -360:0 format
+    lat = ds.variables['lat'][:]
+    # and save them   
+    out_dict['lon'] = lon
+    out_dict['lat'] = lat
+    
+    if testing == True:
+        var_list = ['surf_el']
+    else:
+        var_list = ['surf_el','water_temp','salinity','water_u','water_v']
+        
+    # get the dynamical variables
+    for var_name in var_list:
+        # Get the variables, renaming to be consistent with what we want,
+        # and pack bottom to top
+        #np.warnings.filterwarnings('ignore') # suppress warning related to nans in fields
+        if var_name == 'surf_el':
+            ssh = ds['surf_el'][0, :, :]
+            out_dict['ssh'] = ssh
+        elif var_name == 'water_temp':
+            t3d = ds['water_temp'][0, :, :, :]
+            t3d = t3d[::-1, :, :] # pack bottom to top
+            out_dict['t3d'] = t3d
+        elif var_name == 'salinity':
+            s3d = ds['salinity'][0, :, :, :]
+            s3d = s3d[::-1, :, :]
+            out_dict['s3d'] = s3d
+        elif var_name == 'water_u':
+            u3d = ds['water_u'][0, :, :, :]
+            u3d = u3d[::-1, :, :]
+            out_dict['u3d'] = u3d
+        elif var_name == 'water_v':
+            v3d = ds['water_v'][0, :, :, :]
+            v3d = v3d[::-1, :, :] # pack bottom to top
+            out_dict['v3d'] = v3d
+    ds.close()
+    a = out_dict
+    dts = datetime.strftime(a['dt'], ds_fmt_hr)
+    out_fn = h_out_dir / ('h' + dts + '.p')
+    with open(out_fn,'wb') as f:
+        pickle.dump(a, f)
+    
+    return testing # the keys of this dictionary are separate variables
+
 
 def time_filter(in_dir, h_list, out_dir,datestring_start,datestring_end):
     """
@@ -329,18 +444,19 @@ def extrap_nearest_to_masked(X, Y, fld, fld0=0):
         return fldd
 
 
-def get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z, add_CTD=False):
+def get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z):
     """
     Make use of extrap_nearest_to_masked() to fill fields completely
     before interpolating to the ROMS grid.  It also adds CTD data if asked to,
     creates ubar and vbar, and converts the temperature to potential temperature. Modified with Matt code to interpolate
     """
+    add_CTD = False
     b = pickle.load(open(in_fn, 'rb'))
     vn_list = list(b.keys())    
     # check that things are the expected shape
     def check_coords(shape_tuple, arr_shape):
         if arr_shape != shape_tuple:
-            print('WARNING: array shape mismatch')
+            print('WARNING: array shape mismatch: ' +in_fn)
     for vn in vn_list:
         if vn == 'dt':
             pass
@@ -420,6 +536,103 @@ def get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z, add_CTD=False):
     V['theta'] = seawater.ptmp(V['s3d'], V['t3d'], press_db)    
     return V
 
+def get_extrapolated_para(fname,in_fn, L, M, N, X, Y, lon, lat, z):
+    """
+    Make use of extrap_nearest_to_masked() to fill fields completely
+    before interpolating to the ROMS grid.  It also adds CTD data if asked to,
+    creates ubar and vbar, and converts the temperature to potential temperature. Modified with Matt code to interpolate
+    """
+    add_CTD = False
+
+    with open(in_fn, 'rb') as f:
+        b = pickle.load(f)
+    vn_list = list(b.keys())    
+    # check that things are the expected shape
+    def check_coords(shape_tuple, arr_shape):
+        if arr_shape != shape_tuple:
+            print('WARNING: array shape mismatch: ' +in_fn)
+    for vn in vn_list:
+        if vn == 'dt':
+            pass
+        elif vn == 'ssh':
+            check_coords((M, L), b[vn].shape)
+        else:
+            check_coords((N, M, L), b[vn].shape)    
+    # creat output array and add dt to it.
+    vn_list.remove('dt')
+    V = dict()
+    for vn in vn_list:
+        V[vn] = np.nan + np.ones(b[vn].shape)
+    V['dt'] = b['dt']    
+    # extrapolate ssh
+    vn = 'ssh'
+    v = b[vn]
+    #instead use nearest
+    vv = extrap_nearest_to_masked(X, Y, v)
+    V[vn] = vv
+    vn_list.remove('ssh')    
+    # extrapolate 3D fields
+    for vn in vn_list:
+        v = b[vn]
+        if vn == 't3d':
+            v0 = np.nanmin(v)
+        elif vn == 's3d':
+            v0 = np.nanmax(v)
+        if vn in ['t3d', 's3d']:
+            # print(' -- extrapolating ' + vn)
+            if add_CTD==False:
+                for k in range(N):
+                    fld = v[k, :, :]
+                    fldf = extrap_nearest_to_masked(X, Y, fld, fld0=v0)
+                    V[vn][k, :, :] = fldf
+            elif add_CTD==True:
+                continue
+                '''
+                print(vn + ' Adding CTD data before extrapolating')
+                Cast_dict, sta_df = Ofun_CTD.get_casts(Ldir)
+                for k in range(N):
+                    fld = v[k, :, :]
+                    zz = z[k]
+                    xyorig, fldorig = Ofun_CTD.get_orig(Cast_dict, sta_df,
+                        X, Y, fld, lon, lat, zz, vn)
+                    fldf = Ofun_CTD.extrap_nearest_to_masked_CTD(X,Y,fld,
+                        xyorig=xyorig,fldorig=fldorig,fld0=v0)
+                    V[vn][k, :, :] = fldf
+                '''
+        elif vn in ['u3d', 'v3d']:
+            # print(' -- extrapolating ' + vn)
+            vv = v.copy()
+            vv = np.ma.masked_where(np.isnan(vv), vv)
+            vv[vv.mask] = 0
+            V[vn] = vv.data
+    # Create ubar and vbar.
+    # Note: this is slightly imperfect because the z levels are at the same
+    # position as the velocity levels.
+    dz = np.nan * np.ones((N, 1, 1))
+    dz[1:, 0, 0]= np.diff(z)
+    dz[0, 0, 0] = dz[1, 0, 0]
+    
+    # account for the fact that the new hycom fields do not show up masked
+    u3d = np.ma.masked_where(np.isnan(b['u3d']),b['u3d'])
+    v3d = np.ma.masked_where(np.isnan(b['v3d']),b['v3d'])
+    dz3 = dz * np.ones_like(u3d) # make dz a masked array
+    b['ubar'] = np.sum(u3d*dz3, axis=0) / np.sum(dz3, axis=0)
+    b['vbar'] = np.sum(v3d*dz3, axis=0) / np.sum(dz3, axis=0)
+    
+    for vn in ['ubar', 'vbar']:
+        v = b[vn]
+        vv = v.copy()
+        vv = np.ma.masked_where(np.isnan(vv), vv)
+        vv[vv.mask] = 0
+        V[vn] = vv.data  
+    # calculate potential temperature
+    press_db = -z.reshape((N,1,1))
+    V['theta'] = seawater.ptmp(V['s3d'], V['t3d'], press_db)    
+    out_fn = h_out_dir / ('x' + str(fname))
+    with open(out_fn,'wb') as f:
+        pickle.dump(V, f)
+    dummy = True
+    return dummy
 
 def get_S(S_info_dict):
     """
@@ -824,6 +1037,166 @@ def get_interpolated_z(G, S, b, lon, lat, z, N, zr):
 
     return c
 
+def z_interp_para(ind,vi,zr,z):
+        val = vi[:,ind]
+        zr_val = zr[:,ind]
+        interp_z = interp1d(z, val,  kind='linear', fill_value="extrapolate")
+        vv = interp_z(zr_val)
+        return vv
+    
+
+
+def get_interpolated_z_para(G, S, b, lon, lat, z, N, zr,fname):
+    """
+    This does the horizontal and vertical interpolation to get from
+    extrapolated, filtered HYCOM fields to ROMS fields.
+
+    We use fast nearest neighbor interpolation as much as possible.
+    Also we interpolate everything to the ROMS rho grid, and then crudely
+    interpolate to the u and v grids at the last moment.  Much simpler.
+
+    Modified by Bob S. to use linear interp
+    """
+    
+    # start input dict
+    c = {}
+        
+    #msk = gr.variables['mask_rho'][:,:]
+    
+    # precalculate useful arrays that are used for horizontal interpolation
+    if isinstance(lon, np.ma.MaskedArray):
+        lon = lon.data
+    if isinstance(lat, np.ma.MaskedArray):
+        lat = lat.data
+    mf = 6 #fineness factor how much finer is the grid
+    
+    loni = np.linspace(lon[0],lon[-1],mf*len(lon))
+    lati = np.linspace(lat[0],lat[-1],mf*len(lat))
+    
+    Lnhi, Lthi = np.meshgrid(loni,lati, indexing='xy') #now we have a fine grid
+    #old code
+    #Lon, Lat = np.meshgrid(lon,lat)
+    #XYin = np.array((Lon.flatten(), Lat.flatten())).T
+    #XYr = np.array((G['lon_rho'].flatten(), G['lat_rho'].flatten())).T
+    
+    XYin = np.array((Lnhi.flatten(), Lthi.flatten())).T
+    XYr = np.array((G['lon_rho'].flatten(), G['lat_rho'].flatten())).T
+    # nearest neighbor interpolation from XYin to XYr is done below...
+    h = G['h']
+    angle = G['angle']
+    #IMr = cKDTree(XYin).query(XYr)[1]  #old nearest neighbor
+    interp_func = RegularGridInterpolator((lat, lon), b['ssh'])
+    
+    # 2D fields
+    for vn in ['ssh', 'ubar', 'vbar']:
+        # interp hycom to finer grid
+        
+        setattr(interp_func,'values',b[vn])
+        vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
+        #vn_fi=interp_func((Lthi,Lnhi))
+        
+        # interp to roms from the fine hycom ssh
+        vv = vn_fi#.flatten()[IMr].reshape(h.shape)    
+    
+        vvc = vv.copy()
+        # always a good idea to make sure dict entries are not just pointers
+        # to arrays that might be changed later, hence the .copy()
+        c[vn] = vvc
+        checknan(vvc)
+        
+     #rotate velocites
+    vu = c['ubar']
+    vv = c['vbar']
+
+    u = np.cos(angle) * vu + np.sin(angle) * vv
+    v = np.cos(angle) * vv - np.sin(angle) * vu
+    u = (u[:,:-1] + u[:,1:])/2
+    v = (v[:-1,:] + v[1:,:])/2
+    vvc = u.copy()
+    c['ubar'] = vvc
+    vvc = v.copy()
+    c['vbar'] = vvc
+
+     
+
+        
+        
+    # 3D fields
+    # create intermediate arrays which are on the ROMS lon_rho, lat_rho grid
+    # but have the HYCOM vertical grid (N layers)
+    F = np.nan * np.ones(((N,) + h.shape))
+    vi_dict = {}
+    for vn in ['theta', 's3d', 'u3d', 'v3d']:
+        FF = F.copy()
+        for nn in range(N):
+            vin = b[vn][nn,:,:]
+            # interp hycom to finer grid
+            #interp_func = RegularGridInterpolator((lat, lon), vin)
+            setattr(interp_func,'values',vin)
+            vn_fi=interp_func((G['lat_rho'],G['lon_rho']))
+            #interp_func = RegularGridInterpolator((lat, lon), vin)
+            #vn_fi=interp_func((Lthi,Lnhi))
+            
+            # interp to roms from the fine hycom ssh
+            FF[nn,:,:] = vn_fi#.flatten()[IMr].reshape(h.shape)    
+            #FF[nn,:,:] = vin[IMr].reshape(h.shape)
+        checknan(FF)
+        vi_dict[vn] = FF
+    vv = np.nan*np.ones(((N,)+G['h'].shape))
+     
+    # do the vertical interpolation from HYCOM to ROMS z positions
+    #this is the slow step
+    # create parallel executor
+
+    # Create a partial function with the constant arguments
+    
+
+
+
+    index_list = list(range(G['M']*G['L']))
+    zr_fl = zr.reshape((S['N'],G['M']*G['L']))
+
+    for vn in [ 's3d', 'theta','u3d', 'v3d']:
+        vi = vi_dict[vn]
+        vi_2 = vi.reshape((N,G['M']*G['L']))
+        vvf = np.zeros((N,G['M'],G['L']))
+        vvf = vvf.reshape((N,G['M']*G['L']))
+        for index in index_list:
+            results = z_interp_para(index,vi_2,zr_fl,z)
+            vvf[:,index] = results
+        vv = vvf.reshape((S['N'], G['M'], G['L']))
+        vvc = vv.copy()
+
+        checknan(vvc)
+        c[vn] = vvc
+
+
+
+
+     #rotate velocites
+    vu = c['u3d']
+    vv = c['v3d']
+    u = np.nan * np.ones(((N,) + h.shape))
+    v = np.nan * np.ones(((N,) + h.shape))
+    for nn in range(S['N']):
+        u[nn,:,:] = np.cos(angle) * vu[nn,:,:] + np.sin(angle) * vv[nn,:,:]
+        v[nn,:,:] = np.cos(angle) * vv[nn,:,:] - np.sin(angle) * vu[nn,:,:]
+        
+    u = (u[:,:,:-1] + u[:,:,1:])/2
+    v = (v[:,:-1,:] + v[:,1:,:])/2
+    vvc = u.copy()
+    c['u3d'] = vvc
+    vvc = v.copy()
+    c['v3d'] = vvc
+
+    out_fn = h_out_dir / ('i' + str(fname))
+    with open(out_fn,'wb') as f:
+        pickle.dump(c, f)
+    dummy = True
+    return dummy
+
+
+
 
 def datetime_to_modtime(dt):
     """
@@ -1021,11 +1394,29 @@ out_dir = Path(out_dir)
 hnc_short_list = get_hnc_short_list(h_out_dir)
 
 #generate a pickle file for each hycom nc
-for fn in hnc_short_list:
-    a = convert_extraction(fn)
-    dts = datetime.strftime(a['dt'], ds_fmt_hr)
-    out_fn = h_out_dir / ('h' + dts + '.p')
-    pickle.dump(a, open(out_fn, 'wb'))
+print('converting to pickles...')
+#for fn in hnc_short_list:
+    #a = convert_extraction(fn)
+    #dts = datetime.strftime(a['dt'], ds_fmt_hr)
+    #out_fn = h_out_dir / ('h' + dts + '.p')
+    #pickle.dump(a, open(out_fn, 'wb'))
+
+if pickles:
+    with ProcessPoolExecutor(max_workers=10) as executor:
+        pools = []
+        for fname in hnc_short_list:
+            print('converting ' + str(fname))
+            fn = convert_extraction_para #define function
+            args = [fname] #define args
+            kwargs = {} #
+            # start thread by submitting it to the executor
+            pools.append(executor.submit(fn, *args, **kwargs))
+        for future in as_completed(pools):
+                # retrieve the result
+                a = future.result()
+
+                # report the result
+    print('converted')
 
 #make another list of just those pickle files
 hp_list = sorted([item.name for item in h_out_dir.iterdir()
@@ -1041,7 +1432,9 @@ pickle.dump(coord_dict, open(h_out_dir / 'coord_dict.p', 'wb'))
 
 #now we filter in time a Hanning window to remove inertial oscillations and then backfill land
 
-time_filter(h_out_dir, hp_list, h_out_dir,datestring_start)
+if filter:
+    time_filter(h_out_dir, hp_list, h_out_dir,datestring_start,datestring_end)
+
 
 
 # now prep list for extrapolation
@@ -1049,15 +1442,34 @@ lon, lat, z, L, M, N, X, Y = get_coords(h_out_dir)
 fh_list = sorted([item.name for item in h_out_dir.iterdir()
         if item.name[:2]=='fh'])
 
-
+#skip because we no do in parallel
 #now extrapolate to fill land with nearest neighbor, also makes ubar and vbar
-add_CTD=False #dont gen ctd profiles
-for fn in fh_list:
-    print('-Extrapolating ' + fn)
-    in_fn = h_out_dir / fn
-    V = get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z,
-        add_CTD=add_CTD)
-    pickle.dump(V, open(h_out_dir / ('x' + fn), 'wb'))
+ #dont gen ctd profiles
+#for fn in fh_list:
+    #print('-Extrapolating ' + fn)
+    #in_fn = h_out_dir / fn
+    #V = get_extrapolated(in_fn, L, M, N, X, Y, lon, lat, z,
+    #    )
+    #pickle.dump(V, open(h_out_dir / ('x' + fn), 'wb'))
+
+
+# create parallel executor
+if extrap:
+    with ProcessPoolExecutor() as executor:
+        pools = []
+        for fname in fh_list:
+            print('-Extrapolating ' + fname)
+            in_fn = h_out_dir / fname
+            fn = get_extrapolated_para #define function
+            args = [fname,in_fn, L, M, N, X, Y, lon, lat, z] #define args
+            kwargs = {} #
+            # start thread by submitting it to the executor
+            pools.append(executor.submit(fn, *args, **kwargs))
+        for future in as_completed(pools):
+                # retrieve the result
+                V = future.result()
+                # report the result
+    print('extrapolated')
 
 #now code to interpolate to roms
 # get grid and S info
@@ -1073,18 +1485,38 @@ xfh_list = sorted([item.name for item in h_out_dir.iterdir()
 # load a dict of hycom fields
 dt_list = []
 count = 0
-c_dict = dict()
 #zinds = get_zinds(G['h'], S, z) #enforce -5000 m
 zr = get_z(G['h'], 0*G['h'], S, only_rho=True) #gets zr
 
 #now interpolate to ROMS grid
-for fn in xfh_list:
-    print('-Interpolating ' + fn + ' to ROMS grid')
-    b = pickle.load(open(h_out_dir / fn, 'rb'))
+
+for fname in xfh_list:
+    with open(h_out_dir / fname,'rb') as f:
+        b = pickle.load(f)
     dt_list.append(b['dt'])
-    c = get_interpolated_z(G, S, b, lon, lat, z, N, zr) #modified to use linear interp instead
-    c_dict[count] = c
+    if interp:
+        print('-Interpolating ' + fname + ' to ROMS grid')
+        c = get_interpolated_z_para(G, S, b, lon, lat, z, N, zr,fname) #modified to use linear interp instead
     count += 1
+
+#if interp:
+    #with ProcessPoolExecutor(max_workers=5) as executor:
+        #pools = []
+        #for fname in xfh_list:
+            #print('-Interpolating ' + fname + ' to ROMS grid')
+            #with open(h_out_dir / fname,'rb') as f:
+                #b = pickle.load(f)
+            #dt_list.append(b['dt'])
+            #fn = get_interpolated_z_para #define function
+            #args = [G, S, b, lon, lat, z, N, zr,fname]
+            #kwargs = {} #
+            # start thread by submitting it to the executor
+            #pools.append(executor.submit(fn, *args, **kwargs))
+        #for future in as_completed(pools):
+                # retrieve the result
+                #V = future.result()
+                # report the result
+    #print('interpolated')
 
 # Write to ROMS forcing files
 # The fields we want to write are in c_dict, whose keys are indices of time.
@@ -1102,87 +1534,127 @@ NZ = S['N']; NR = G['M']; NC = G['L']
 
 # Make the time vector.
 ot_vec = np.array([datetime_to_modtime(item) for item in dt_list])
-NT = len(ot_vec)
+NT_total = len(ot_vec)
+NT_i = Number_time #new length
 
-# Create a dict of fields for the state variables.
-V = dict()
-V['zeta'] = np.zeros((NT, NR, NC))
-V['ubar'] = np.zeros((NT, NR, NC-1))
-V['vbar'] = np.zeros((NT, NR-1, NC))
-V['salt'] = np.zeros((NT, NZ, NR, NC))
-V['temp'] = np.zeros((NT, NZ, NR, NC))
-V['u'] = np.zeros((NT, NZ, NR, NC-1))
-V['v'] = np.zeros((NT, NZ, NR-1, NC))
+ixfh_list = sorted([item.name for item in h_out_dir.iterdir()
+        if item.name[:4]=='ixfh'])
 
-# Fill the V dict
-for ii in range(NT):
-    C = c_dict[ii]
-    for vnh in hycom_names:
-        vnr = names_dict[vnh]
-        # note that the : here represents all axes after 0
-        # and that it retains the correct shape
-        V[vnr][ii, :] = C[vnh]
+
+
+k = 0
+if nc_need:
+    for t_ind in range(0,NT_total,NT_i):
+
+        t_start = t_ind
+        t_end = t_ind+NT_i
+        NT = NT_i
+        if t_end > NT_total:
+            t_end = NT_total
+            NT = len(ot_vec[t_start:t_end])
+
         
-# Create masks
-mr2 = np.ones((NT, NR, NC)) * G['mask_rho'].reshape((1, NR, NC))
-mr3 = np.ones((NT, NZ, NR, NC)) * G['mask_rho'].reshape((1, 1, NR, NC))
-mu2 = np.ones((NT, NR, NC-1)) * G['mask_u'].reshape((1, NR, NC-1))
-mu3 = np.ones((NT, NZ, NR, NC-1)) * G['mask_u'].reshape((1, 1, NR, NC-1))
-mv2 = np.ones((NT, NR-1, NC)) * G['mask_v'].reshape((1, NR-1, NC))
-mv3 = np.ones((NT, NZ, NR-1, NC)) * G['mask_v'].reshape((1, 1, NR-1, NC))
-
-# Apply masks
-V['zeta'][mr2==0] = np.nan
-V['ubar'][mu2==0] = np.nan
-V['vbar'][mv2==0] = np.nan
-V['salt'][mr3==0] = np.nan
-V['temp'][mr3==0] = np.nan
-V['u'][mu3==0] = np.nan
-V['v'][mv3==0] = np.nan
+        # Create a dict of fields for the state variables.
+        V = dict()
+        V['zeta'] = np.zeros((NT, NR, NC))
+        V['ubar'] = np.zeros((NT, NR, NC-1))
+        V['vbar'] = np.zeros((NT, NR-1, NC))
+        V['salt'] = np.zeros((NT, NZ, NR, NC))
+        V['temp'] = np.zeros((NT, NZ, NR, NC))
+        V['u'] = np.zeros((NT, NZ, NR, NC-1))
+        V['v'] = np.zeros((NT, NZ, NR-1, NC))
 
 
-roms_time_units = 'seconds since 1970-01-01 00:00:00'
-out_fn = out_dir / clm_fname
-ds = xr.Dataset()    
-for vn in V.keys():
-    # tt00 = time()
-    vinfo =get_varinfo(vn, vartype='climatology')
-    # print(' -- time to get varinfo: %0.2f sec' % (time()-tt00))
-    tname = vinfo['time_name']
-    dims = (vinfo['time_name'],) + vinfo['space_dims_tup']
-    ds[vn] = (dims, V[vn])
-    ds[vn].attrs['units'] = vinfo['units']
-    ds[vn].attrs['long_name'] = vinfo['long_name']
-    # time coordinate
-    ds[tname] = ((tname,), ot_vec)
-    ds[tname].attrs['units'] = roms_time_units
-# and save to NetCDF
-enc_dict = {'zlib':True, 'complevel':1, '_FillValue':1e20}
-Enc_dict = {vn:enc_dict for vn in ds.data_vars}
-ds.to_netcdf(out_fn, encoding=Enc_dict)
-ds.close()
-sys.stdout.flush()
+        # Fill the V dict
+        ii = 0 
+        print('make_dicts')
+        for fname in ixfh_list[t_start:t_end]:
+            print(fname)
+            with open(h_out_dir / fname,'rb') as f:
+                C = pickle.load(f)
+            for vnh in hycom_names:
+                vnr = names_dict[vnh]
+                # note that the : here represents all axes after 0
+                # and that it retains the correct shape
+                V[vnr][ii, :] = C[vnh]
+            C = None
+            ii += 1
 
-# Write initial condition file if needed
-tt0 = time()
-in_fn = out_dir / clm_fname
-out_fn = out_dir / ini_fname
-out_fn.unlink(missing_ok=True)
-make_ini_file(in_fn, out_fn)
-print('- Write ini file: %0.2f sec' % (time()-tt0))
-sys.stdout.flush()
+        # Create masks
+        mr2 = np.ones((NT, NR, NC)) * G['mask_rho'].reshape((1, NR, NC))
+        mr3 = np.ones((NT, NZ, NR, NC)) * G['mask_rho'].reshape((1, 1, NR, NC))
+        mu2 = np.ones((NT, NR, NC-1)) * G['mask_u'].reshape((1, NR, NC-1))
+        mu3 = np.ones((NT, NZ, NR, NC-1)) * G['mask_u'].reshape((1, 1, NR, NC-1))
+        mv2 = np.ones((NT, NR-1, NC)) * G['mask_v'].reshape((1, NR-1, NC))
+        mv3 = np.ones((NT, NZ, NR-1, NC)) * G['mask_v'].reshape((1, 1, NR-1, NC))
 
-# Write boundary file
-tt0 = time()
-in_fn = out_dir / clm_fname
-out_fn = out_dir / bry_fname
-out_fn.unlink(missing_ok=True)
-make_bry_file(in_fn, out_fn)
-print('- Write bry file: %0.2f sec' % (time()-tt0))
-sys.stdout.flush()
+        # Apply masks
+        V['zeta'][mr2==0] = np.nan
+        V['ubar'][mu2==0] = np.nan
+        V['vbar'][mv2==0] = np.nan
+        V['salt'][mr3==0] = np.nan
+        V['temp'][mr3==0] = np.nan
+        V['u'][mu3==0] = np.nan
+        V['v'][mv3==0] = np.nan
+
+        mr2 = None
+        mu2 = None
+        mv2 = None
+        mr3 = None
+        mu3 = None
+        mv3 = None
 
 
 
+    
+        clm_fname = clm_fname_base+str(k)+'.nc'
+        ini_fname = ini_fname_base+str(k)+'.nc'
+        bry_fname = bry_fname_base+str(k)+'.nc'
+        roms_time_units = 'seconds since 1970-01-01 00:00:00'
+        out_fn = out_dir / clm_fname
+        ds = xr.Dataset()    
+        for vn in V.keys():
+            # tt00 = time()
+            vinfo =get_varinfo(vn, vartype='climatology')
+            # print(' -- time to get varinfo: %0.2f sec' % (time()-tt00))
+            tname = vinfo['time_name']
+            dims = (vinfo['time_name'],) + vinfo['space_dims_tup']
+            ds[vn] = (dims, V[vn])
+            ds[vn].attrs['units'] = vinfo['units']
+            ds[vn].attrs['long_name'] = vinfo['long_name']
+            # time coordinate
+            ds[tname] = ((tname,), ot_vec[t_start:t_end])
+            ds[tname].attrs['units'] = roms_time_units
+        # and save to NetCDF
+        enc_dict = {'zlib':True, 'complevel':1, '_FillValue':1e20}
+        Enc_dict = {vn:enc_dict for vn in ds.data_vars}
+        ds.to_netcdf(out_fn, encoding=Enc_dict)
+        ds.close()
+        sys.stdout.flush()
+
+        # Write initial condition file if needed
+        tt0 = time()
+        in_fn = out_dir / clm_fname
+        out_fn = out_dir / ini_fname
+        out_fn.unlink(missing_ok=True)
+        make_ini_file(in_fn, out_fn)
+        print('- Write ini file: %0.2f sec' % (time()-tt0))
+        sys.stdout.flush()
+
+        # Write boundary file
+        tt0 = time()
+        in_fn = out_dir / clm_fname
+        out_fn = out_dir / bry_fname
+        out_fn.unlink(missing_ok=True)
+        make_bry_file(in_fn, out_fn)
+        print('- Write bry file: %0.2f sec' % (time()-tt0))
+        sys.stdout.flush()
+        k += 1
 
 
-)
+
+
+
+
+
+
