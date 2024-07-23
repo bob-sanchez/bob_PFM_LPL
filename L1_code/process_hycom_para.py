@@ -23,8 +23,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 grid_file = '/home/rmsanche/research/LV1_2017/GRID_SDTJRE_LV1_rx020_hmask.nc' #LV1 grid
 
-datestring_start = '2016.11.30.00' #initial file time, note it will process all the times in a folder after this time
-datestring_end = '2017.12.05.09'
+datestring_start = '2016.11.20.00' #initial file time, note it will process all the times in a folder after this time
+datestring_end = '2017.12.10.00'
 
 hout_dir = '/scratch/bob/Hycom/' #where the history files are located
 out_dir = '/scratch/bob/Hycom/' #where the processed files are to be dumped
@@ -40,9 +40,9 @@ interp = False #is it on the roms grid ixfh*.p
 nc_need = True # are there .nc files
 
 #info about roms grid (can be found by looking at roms grid)
-clm_fname_base = 'ocean_clm_LV1_' #output file names for clm file, ini file and bry file
-ini_fname_base = 'ocean_ini_LV1_'
-bry_fname_base = 'ocean_bry_LV1_'
+clm_fname_base = 'ocean_clm_LV1_t' #output file names for clm file, ini file and bry file
+ini_fname_base = 'ocean_ini_LV1_t'
+bry_fname_base = 'ocean_bry_LV1_t'
 Number_time = 5 #number of timesteps per file
 
 #can make it so that it automatically removes the hycom files from the directory after the boundary conditions are made
@@ -1442,6 +1442,7 @@ lon, lat, z, L, M, N, X, Y = get_coords(h_out_dir)
 fh_list = sorted([item.name for item in h_out_dir.iterdir()
         if item.name[:2]=='fh'])
 
+
 #skip because we no do in parallel
 #now extrapolate to fill land with nearest neighbor, also makes ubar and vbar
  #dont gen ctd profiles
@@ -1481,7 +1482,7 @@ S = get_S(S_info_dict)
 # make list of files to process
 xfh_list = sorted([item.name for item in h_out_dir.iterdir()
         if item.name[:3]=='xfh'])
-
+print(xfh_list[0])
 # load a dict of hycom fields
 dt_list = []
 count = 0
@@ -1489,7 +1490,6 @@ count = 0
 zr = get_z(G['h'], 0*G['h'], S, only_rho=True) #gets zr
 
 #now interpolate to ROMS grid
-
 for fname in xfh_list:
     with open(h_out_dir / fname,'rb') as f:
         b = pickle.load(f)
@@ -1498,6 +1498,7 @@ for fname in xfh_list:
         print('-Interpolating ' + fname + ' to ROMS grid')
         c = get_interpolated_z_para(G, S, b, lon, lat, z, N, zr,fname) #modified to use linear interp instead
     count += 1
+
 
 #if interp:
     #with ProcessPoolExecutor(max_workers=5) as executor:
@@ -1536,6 +1537,7 @@ NZ = S['N']; NR = G['M']; NC = G['L']
 ot_vec = np.array([datetime_to_modtime(item) for item in dt_list])
 NT_total = len(ot_vec)
 NT_i = Number_time #new length
+NT_i = 1
 
 ixfh_list = sorted([item.name for item in h_out_dir.iterdir()
         if item.name[:4]=='ixfh'])
@@ -1545,8 +1547,8 @@ ixfh_list = sorted([item.name for item in h_out_dir.iterdir()
 k = 0
 if nc_need:
     for t_ind in range(0,NT_total,NT_i):
-
         t_start = t_ind
+        #t_end = t_ind+1
         t_end = t_ind+NT_i
         NT = NT_i
         if t_end > NT_total:
